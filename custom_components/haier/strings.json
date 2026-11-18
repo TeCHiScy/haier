@@ -1,7 +1,8 @@
 {
     "config": {
         "error": {
-            "auth_error": "Authentication failed: {reason}"
+            "auth_error": "Authentication failed: {reason}",
+            "sms_send_error": "Failed to send the SMS code: {reason}"
         },
         "step": {
             "user": {
@@ -9,7 +10,8 @@
                 "description": "Choose a sign-in method.",
                 "menu_options": {
                     "phone_login": "Sign in by automatically getting a token with your account and password (recommended)",
-                    "manual": "Sign in with a manually entered token (advanced)"
+                    "manual": "Sign in with a manually entered token (advanced)",
+                    "sms_login": "Sign in with phone number and SMS code (recommended)"
                 }
             },
             "manual": {
@@ -28,12 +30,45 @@
                     "phone": "Phone number",
                     "password": "Password"
                 }
+            },
+            "sms_login": {
+                "title": "Connect Haier",
+                "description": "Enter the phone number of your Haier Smart Home account. A one-time code will be sent by SMS.",
+                "data": {
+                    "phone": "Phone number"
+                }
+            },
+            "sms_login_code": {
+                "title": "Connect Haier",
+                "description": "Enter the SMS code sent to {phone}.",
+                "data": {
+                    "sms_code": "SMS code"
+                }
+            },
+            "reauth_confirm": {
+                "title": "Re-authenticate Haier",
+                "description": "The stored Haier session expired. Enter the phone number of your account to receive a new SMS code.",
+                "data": {
+                    "phone": "Phone number"
+                }
+            },
+            "reauth_sms_code": {
+                "title": "Re-authenticate Haier",
+                "description": "Enter the SMS code sent to {phone}.",
+                "data": {
+                    "sms_code": "SMS code"
+                }
             }
+        },
+        "abort": {
+            "sms_flow_expired": "The SMS sign-in session expired. Please start again.",
+            "reauth_entry_missing": "The config entry to re-authenticate no longer exists."
         }
     },
     "options": {
         "error": {
-            "auth_error": "Authentication failed: {reason}"
+            "auth_error": "Authentication failed: {reason}",
+            "sms_send_error": "Failed to send the SMS code: {reason}"
         },
         "step": {
             "init": {
@@ -49,7 +84,8 @@
                 "description": "Choose a sign-in method.",
                 "menu_options": {
                     "account_phone_login": "Sign in by automatically getting a token with your account and password (recommended)",
-                    "account_manual": "Sign in with a manually entered token (advanced)"
+                    "account_manual": "Sign in with a manually entered token (advanced)",
+                    "account_sms_login": "Sign in with phone number and SMS code (recommended)"
                 }
             },
             "account_phone_login": {
@@ -99,6 +135,20 @@
                     "device_id": "Target device（do not modify）",
                     "filter_method": "Filter method",
                     "target_entities": "Entities"
+                }
+            },
+            "account_sms_login": {
+                "title": "Update account",
+                "description": "Enter the phone number of your Haier Smart Home account. A one-time code will be sent by SMS.",
+                "data": {
+                    "phone": "Phone number"
+                }
+            },
+            "account_sms_login_code": {
+                "title": "Update account",
+                "description": "Enter the SMS code sent to {phone}.",
+                "data": {
+                    "sms_code": "SMS code"
                 }
             }
         }

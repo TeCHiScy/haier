@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -38,7 +38,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     try:
         hass.data[DOMAIN]['cancel_token_updater'] = await token_updater(hass, entry)
     except HaierClientException as err:
-        raise ConfigEntryNotReady('Haier authentication failed') from err
+        # refresh_token 失效（如 43005）：交给 HA 走重新认证，而不是无限重试 setup
+        raise ConfigEntryAuthFailed(f'Haier authentication failed: {err}') from err
 
     account_cfg = AccountConfig(hass, entry)
     preferences_cfg = PreferencesConfig(hass, entry)
@@ -106,8 +107,10 @@ async def token_updater(hass: HomeAssistant, entry: ConfigEntry):
                 await hass.config_entries.async_reload(entry.entry_id)
             else:
                 _LOGGER.debug('token is valid')
-        except HaierClientException:
-            _LOGGER.warning('token refresh authentication failed')
+        except HaierClientException as err:
+            _LOGGER.warning('token refresh authentication failed: %s', err)
+            # 后台任务里的异常不会被 HA 接管，显式触发重新认证（HA 会提示用户重新登录）
+            entry.async_start_reauth(hass)
         except Exception:
             _LOGGER.exception('token update failed')
 

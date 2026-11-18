@@ -6,7 +6,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.config_validation import multi_select
 
 from .const import (
@@ -45,6 +45,17 @@ class AuthenticationResult:
 
 class LoginFlowMixin:
     """复用登录方式菜单、表单和认证处理。"""
+
+    # 下列属性/方法由宿主 flow 类（ConfigFlow / OptionsFlow）提供，这里只做类型声明。
+    hass: HomeAssistant
+    async_show_form: Any
+    async_show_menu: Any
+    async_abort: Any
+    async_create_entry: Any
+    async_update_reload_and_abort: Any
+
+    # 短信登录的中间状态：已发码的手机号
+    _sms_phone: str | None = None
 
     async def _async_phone_login_form(
         self,
@@ -91,6 +102,79 @@ class LoginFlowMixin:
             ),
             errors=errors,
             description_placeholders=description_placeholders
+        )
+
+    async def _async_sms_phone_form(
+        self,
+        step_id: str,
+        user_input: dict[str, Any] | None,
+    ) -> ConfigFlowResult | None:
+        """短信登录第一步：收集手机号并发送验证码。发送成功返回 None。"""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                phone = user_input['phone']
+                # 短信登录只能用 wxapp 来源：refresh_token 与签发它的 appId 绑定
+                client = HaierClient(self.hass, phone, '', APP_SOURCE_WXAPP)
+                await client.send_sms_code(phone)
+                self._sms_phone = phone
+                return None
+            except HaierClientException as e:
+                _LOGGER.warning(str(e))
+                errors['base'] = 'sms_send_error'
+                description_placeholders['reason'] = str(e)
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema({vol.Required('phone'): str}),
+            errors=errors,
+            description_placeholders=description_placeholders
+        )
+
+    async def _async_sms_code_form(
+        self,
+        step_id: str,
+        user_input: dict[str, Any] | None,
+    ) -> ConfigFlowResult | AuthenticationResult:
+        """短信登录第二步：用验证码换 token 并拉取用户信息。"""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+        phone = getattr(self, '_sms_phone', None)
+
+        if phone is None:
+            return self.async_abort(reason='sms_flow_expired')
+
+        if user_input is not None:
+            try:
+                client = HaierClient(self.hass, phone, '', APP_SOURCE_WXAPP)
+                token_info = await client.phone_sms_login(phone, user_input['sms_code'])
+                client = HaierClient(
+                    self.hass, phone, token_info.token, APP_SOURCE_WXAPP
+                )
+                user_info = await client.get_user_info()
+
+                return AuthenticationResult(
+                    account={
+                        'client_id': phone,
+                        'token': token_info.token,
+                        'refresh_token': token_info.refresh_token,
+                        'expires_at': int(time.time()) + token_info.expires_in,
+                        'app_source': APP_SOURCE_WXAPP,
+                    },
+                    mobile=user_info['mobile']
+                )
+            except HaierClientException as e:
+                _LOGGER.warning(str(e))
+                errors['base'] = 'auth_error'
+                description_placeholders['reason'] = str(e)
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema({vol.Required('sms_code'): str}),
+            errors=errors,
+            description_placeholders={**description_placeholders, 'phone': phone}
         )
 
     async def _async_manual_login_form(
@@ -165,7 +249,7 @@ class HaierConfigFlow(LoginFlowMixin, config_entries.ConfigFlow, domain=DOMAIN):
         """选择登录方式"""
         return self.async_show_menu(
             step_id="user",
-            menu_options=['phone_login', 'manual']
+            menu_options=['sms_login', 'phone_login', 'manual']
         )
 
     async def async_step_manual(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -188,6 +272,59 @@ class HaierConfigFlow(LoginFlowMixin, config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_create_entry(
             title="Haier - {}".format(result.mobile),
+            data={
+                'account': result.account
+            }
+        )
+
+    async def async_step_sms_login(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """手机号+短信验证码登录（第一步：手机号）"""
+        form = await self._async_sms_phone_form('sms_login', user_input)
+        if form is not None:
+            return form
+
+        return await self.async_step_sms_login_code()
+
+    async def async_step_sms_login_code(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """手机号+短信验证码登录（第二步：验证码）"""
+        result = await self._async_sms_code_form('sms_login_code', user_input)
+        if not isinstance(result, AuthenticationResult):
+            return result
+
+        return self.async_create_entry(
+            title=f"Haier - {result.mobile}",
+            data={
+                'account': result.account
+            }
+        )
+
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        """refresh_token 失效后重新认证：从头走一遍短信登录"""
+        self._sms_phone = None
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """重新认证（第一步：手机号）"""
+        form = await self._async_sms_phone_form('reauth_confirm', user_input)
+        if form is not None:
+            return form
+
+        return await self.async_step_reauth_sms_code()
+
+    async def async_step_reauth_sms_code(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """重新认证（第二步：验证码）"""
+        result = await self._async_sms_code_form('reauth_sms_code', user_input)
+        if not isinstance(result, AuthenticationResult):
+            return result
+
+        entry_id = self.context.get('entry_id')
+        entry = self.hass.config_entries.async_get_entry(entry_id) if entry_id else None
+        if entry is None:
+            return self.async_abort(reason='reauth_entry_missing')
+
+        return self.async_update_reload_and_abort(
+            entry,
+            title=f"Haier - {result.mobile}",
             data={
                 'account': result.account
             }
@@ -218,7 +355,7 @@ class OptionsFlowHandler(LoginFlowMixin, config_entries.OptionsFlow):
         """选择账户登录方式。"""
         return self.async_show_menu(
             step_id="account",
-            menu_options=['account_phone_login', 'account_manual']
+            menu_options=['account_sms_login', 'account_phone_login', 'account_manual']
         )
 
     async def _async_save_account_authentication(
@@ -244,6 +381,26 @@ class OptionsFlowHandler(LoginFlowMixin, config_entries.OptionsFlow):
         result = await self._async_phone_login_form(
             'account_phone_login', user_input
         )
+        if not isinstance(result, AuthenticationResult):
+            return result
+
+        return await self._async_save_account_authentication(result)
+
+    async def async_step_account_sms_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """使用手机号+短信验证码更新账户（第一步：手机号）。"""
+        form = await self._async_sms_phone_form('account_sms_login', user_input)
+        if form is not None:
+            return form
+
+        return await self.async_step_account_sms_login_code()
+
+    async def async_step_account_sms_login_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """使用手机号+短信验证码更新账户（第二步：验证码）。"""
+        result = await self._async_sms_code_form('account_sms_login_code', user_input)
         if not isinstance(result, AuthenticationResult):
             return result
 

@@ -33,6 +33,8 @@ APP_SOURCES = {
 
 REFRESH_TOKEN_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/refreshToken'
 PHONE_LOGIN_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/login'
+SEND_SMS_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/smsVerificationCode'
+PHONE_SMS_LOGIN_API = 'https://zj.haier.net/api-gw/oauthserver/account/v1/loginBySMS'
 GET_USER_INFO_API = 'https://account-api.haier.net/v2/haier/userinfo'
 GET_DEVICES_API = 'https://uws.haier.net/uds/v1/protected/deviceinfos'
 GET_WSS_GW_API = 'https://uws.haier.net/gmsWS/wsag/assign'
@@ -78,10 +80,13 @@ def retry_on_exception(exceptions, max_tries=3):
 
 class TokenInfo:
 
-    def __init__(self, token: str, refresh_token: str, expires_in: int):
+    # 登录接口未返回 expiresIn 时的兜底时长（秒）。取值偏保守，避免刷新风暴。
+    DEFAULT_EXPIRES_IN = 86400 * 3
+
+    def __init__(self, token: str, refresh_token: str = '', expires_in: int = 0):
         self._token = token
         self._refresh_token = refresh_token
-        self._expires_in = expires_in
+        self._expires_in = expires_in or self.DEFAULT_EXPIRES_IN
 
     @property
     def token(self) -> str:
@@ -132,6 +137,50 @@ class HaierClient:
                 token_info['accountToken'],
                 token_info['refreshToken'],
                 token_info['expiresIn']
+            )
+
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def send_sms_code(self, phone: str) -> None:
+        """
+        发送登录短信验证码（使用微信小程序来源的 appId/appKey）。
+        :param phone: 手机号
+        """
+        payload = {
+            'phoneNumber': phone,
+            'scenario': 'login'
+        }
+
+        headers = await self._generate_common_headers(SEND_SMS_API, json.dumps(payload))
+        async with self._session.post(url=SEND_SMS_API, headers=headers, json=payload) as response:
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+
+    @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
+    async def phone_sms_login(self, phone: str, sms_code: str) -> TokenInfo:
+        """
+        手机号+短信验证码登录（使用微信小程序来源的 appId/appKey）。
+
+        注意：refresh_token 与签发它的 appId 绑定，所以短信登录必须与
+        APP_SOURCE_WXAPP 配套使用，否则后续刷新会返回 43005。
+        :param phone: 手机号
+        :param sms_code: 短信验证码
+        :return: TokenInfo
+        """
+        payload = {
+            'phone': phone,
+            'smsCode': sms_code
+        }
+
+        headers = await self._generate_common_headers(PHONE_SMS_LOGIN_API, json.dumps(payload))
+        async with self._session.post(url=PHONE_SMS_LOGIN_API, headers=headers, json=payload) as response:
+            content = await response.json(content_type=None)
+            self._assert_response_successful(content)
+
+            token_info = content['data']['tokenInfo']
+            return TokenInfo(
+                token_info['accountToken'],
+                token_info.get('refreshToken', ''),
+                token_info.get('expiresIn', 0)
             )
 
     @retry_on_exception(exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
@@ -222,7 +271,11 @@ class HaierClient:
                 ))
                 return []
 
-            return json.loads(content['detailInfo'][deviceId])['attributes']
+            try:
+                return json.loads(content['detailInfo'][deviceId])['attributes']
+            except (TypeError, ValueError) as err:
+                _LOGGER.warning("Device %s digital model parse fail: %s", deviceId, err)
+                return []
 
     async def get_digital_model_from_cache(self, device: HaierDevice) -> list:
         """
@@ -342,7 +395,9 @@ class HaierClient:
     @staticmethod
     def _assert_response_successful(resp):
         if 'retCode' in resp and resp['retCode'] != '00000':
-            raise HaierClientException('接口返回异常: ' + resp['retInfo'])
+            raise HaierClientException(
+                '接口返回异常: {} (retCode={})'.format(resp.get('retInfo'), resp.get('retCode'))
+            )
 
     @staticmethod
     def _sign(app_id, app_key, timestamp, body, url):
